@@ -45,8 +45,9 @@ use frame_support::{
 	construct_runtime, derive_impl,
 	genesis_builder_helper::{build_config, create_default_config},
 	parameter_types,
-	traits::{KeyOwnerProofSystem, WithdrawReasons},
+	traits::{EitherOfDiverse, KeyOwnerProofSystem, WithdrawReasons},
 };
+use frame_system::EnsureRoot;
 use pallet_grandpa::{fg_primitives, AuthorityId as GrandpaId};
 use pallet_session::historical as session_historical;
 use pallet_transaction_payment::{FeeDetails, RuntimeDispatchInfo};
@@ -88,11 +89,25 @@ pub use pallet_sudo::Call as SudoCall;
 pub use pallet_timestamp::Call as TimestampCall;
 pub use parachains_paras::Call as ParasCall;
 pub use paras_sudo_wrapper::Call as ParasSudoWrapperCall;
+use runtime_common::impls::{
+	LocatableAssetConverter, VersionedLocatableAsset, VersionedLocationConverter,
+};
+use sp_runtime::traits::IdentityLookup;
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
 
 /// Constant values used within the runtime.
 use test_runtime_constants::{currency::*, fee::*, time::*};
+use xcm::VersionedLocation;
+use xcm_builder::PayOverXcm;
+
+pub mod governance;
+use governance::{
+	pallet_custom_origins, AuctionAdmin, FellowshipAdmin, GeneralAdmin, LeaseAdmin, StakingAdmin,
+	Treasurer, TreasurySpender,
+};
+
+mod weights;
 pub mod xcm_config;
 
 impl_runtime_weights!(test_runtime_constants);
@@ -687,6 +702,9 @@ construct_runtime! {
 		Session: pallet_session,
 		Grandpa: pallet_grandpa,
 		AuthorityDiscovery: pallet_authority_discovery,
+
+		// Open gov
+		Origins: pallet_custom_origins,
 
 		// Claims. Usable initially.
 		Claims: claims,

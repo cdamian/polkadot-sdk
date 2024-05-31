@@ -17,12 +17,9 @@
 //! XCM configuration for Polkadot.
 
 use super::{
-	parachains_origin, AccountId, AllPalletsWithSystem, Balances, Dmp, ParaId, Runtime,
-	RuntimeCall, RuntimeEvent, RuntimeOrigin, TransactionByteFee, WeightToFee, Xcm,
-};
-use crate::{
-	governance::{FellowshipAdmin, GeneralAdmin, StakingAdmin, Treasurer},
-	weights::{PolkadotXcmWeight, XcmBalancesWeight, XcmGeneric},
+	parachains_origin, AccountId, AllPalletsWithSystem, Balances, Dmp, FellowshipAdmin,
+	GeneralAdmin, ParaId, Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, StakingAdmin,
+	TransactionByteFee, Treasurer, Treasury, WeightToFee, XcmPallet,
 };
 use frame_support::{
 	parameter_types,
@@ -31,23 +28,23 @@ use frame_support::{
 };
 use frame_system::EnsureRoot;
 use pallet_xcm::XcmPassthrough;
-use polkadot_parachain_primitives::primitives::Id;
+use polkadot_runtime_constants::{
+	currency::CENTS, system_parachain::*, xcm::body::FELLOWSHIP_ADMIN_INDEX,
+};
 use runtime_common::{
 	xcm_sender::{ChildParachainRouter, ExponentialPrice},
 	ToAuthor,
 };
 use sp_core::ConstU32;
-use test_runtime_constants::currency::CENTS;
 use xcm::latest::prelude::*;
 use xcm_builder::{
 	AccountId32Aliases, AllowExplicitUnpaidExecutionFrom, AllowKnownQueryResponses,
 	AllowSubscriptionsFrom, AllowTopLevelPaidExecutionFrom, ChildParachainAsNative,
 	ChildParachainConvertsVia, DescribeAllTerminal, DescribeFamily, FrameTransactionalProcessor,
-	FungibleAdapter, HashedDescription, IsChildSystemParachain, IsConcrete, MintLocation,
-	OriginToPluralityVoice, SignedAccountId32AsNative, SignedToAccountId32,
-	SovereignSignedViaLocation, TakeWeightCredit, TrailingSetTopicAsId, UsingComponents,
-	WeightInfoBounds, WithComputedOrigin, WithUniqueTopic, XcmFeeManagerFromComponents,
-	XcmFeeToAccount,
+	FungibleAdapter, HashedDescription, IsConcrete, MintLocation, OriginToPluralityVoice,
+	SignedAccountId32AsNative, SignedToAccountId32, SovereignSignedViaLocation, TakeWeightCredit,
+	TrailingSetTopicAsId, UsingComponents, WeightInfoBounds, WithComputedOrigin, WithUniqueTopic,
+	XcmFeeManagerFromComponents, XcmFeeToAccount,
 };
 
 parameter_types! {
@@ -61,9 +58,11 @@ parameter_types! {
 	/// Our location in the universe of consensus systems.
 	pub UniversalLocation: InteriorLocation = [GlobalConsensus(ThisNetwork::get())].into();
 	/// The Checking Account, which holds any native assets that have been teleported out and not back in (yet).
-	pub CheckAccount: AccountId = Xcm::check_account();
+	pub CheckAccount: AccountId = XcmPallet::check_account();
 	/// The Checking Account along with the indication that the local chain is able to mint tokens.
 	pub LocalCheckAccount: (AccountId, MintLocation) = (CheckAccount::get(), MintLocation::Local);
+	/// Account of the treasury pallet.
+	pub TreasuryAccount: AccountId = Treasury::account_id();
 }
 
 /// The canonical means of converting a `Location` into an `AccountId`, used when we want to
@@ -130,15 +129,8 @@ pub type PriceForChildParachainDelivery =
 /// individual routers.
 pub type XcmRouter = WithUniqueTopic<(
 	// Only one router so far - use DMP to communicate with child parachains.
-	ChildParachainRouter<Runtime, Xcm, PriceForChildParachainDelivery>,
+	ChildParachainRouter<Runtime, XcmPallet, PriceForChildParachainDelivery>,
 )>;
-
-/// Asset Hub parachain ID.
-pub const ASSET_HUB_ID: u32 = 1000;
-/// Collectives parachain ID.
-pub const COLLECTIVES_ID: u32 = 1001;
-/// Bridge Hub parachain ID.
-pub const BRIDGE_HUB_ID: u32 = 1002;
 
 parameter_types! {
 	pub const Dot: AssetFilter = Wild(AllOf { fun: WildFungible, id: AssetId(TokenLocation::get()) });
@@ -150,6 +142,13 @@ parameter_types! {
 	pub DotForBridgeHub: (AssetFilter, Location) = (Dot::get(), BridgeHubLocation::get());
 	pub const MaxAssetsIntoHolding: u32 = 64;
 }
+
+/// Polkadot Relay recognizes/respects AssetHub, Collectives, and BridgeHub chains as teleporters.
+pub type TrustedTeleporters = (
+	xcm_builder::Case<DotForAssetHub>,
+	xcm_builder::Case<DotForCollectives>,
+	xcm_builder::Case<DotForBridgeHub>,
+);
 
 pub struct CollectivesOrFellows;
 impl Contains<Location> for CollectivesOrFellows {
@@ -181,7 +180,7 @@ pub type Barrier = TrailingSetTopicAsId<(
 	// Weight that is paid for may be consumed.
 	TakeWeightCredit,
 	// Expected responses are OK.
-	AllowKnownQueryResponses<Xcm>,
+	AllowKnownQueryResponses<XcmPallet>,
 	WithComputedOrigin<
 		(
 			// If the message is one that immediately attempts to pay for execution, then allow it.
@@ -196,8 +195,6 @@ pub type Barrier = TrailingSetTopicAsId<(
 	>,
 )>;
 
-pub type SystemParachains = IsChildSystemParachain<Id>;
-
 /// Locations that will not be charged fees in the executor, neither for execution nor delivery.
 /// We only waive fees for system functions, which these locations represent.
 pub type WaivedLocations = (SystemParachains, Equals<RootLocation>, LocalPlurality);
@@ -210,24 +207,28 @@ impl xcm_executor::Config for XcmConfig {
 	type OriginConverter = LocalOriginConverter;
 	// Polkadot Relay recognises no chains which act as reserves.
 	type IsReserve = ();
-	type IsTeleporter = ();
+	type IsTeleporter = TrustedTeleporters;
 	type UniversalLocation = UniversalLocation;
 	type Barrier = Barrier;
-	type Weigher = WeightInfoBounds<PolkadotXcmWeight<RuntimeCall>, RuntimeCall, MaxInstructions>;
+	type Weigher = WeightInfoBounds<
+		crate::weights::xcm::PolkadotXcmWeight<RuntimeCall>,
+		RuntimeCall,
+		MaxInstructions,
+	>;
 	// The weight trader piggybacks on the existing transaction-fee conversion logic.
 	type Trader =
 		UsingComponents<WeightToFee, TokenLocation, AccountId, Balances, ToAuthor<Runtime>>;
-	type ResponseHandler = Xcm;
-	type AssetTrap = Xcm;
+	type ResponseHandler = XcmPallet;
+	type AssetTrap = XcmPallet;
 	type AssetLocker = ();
 	type AssetExchanger = ();
-	type AssetClaims = Xcm;
-	type SubscriptionService = Xcm;
+	type AssetClaims = XcmPallet;
+	type SubscriptionService = XcmPallet;
 	type PalletInstancesInfo = AllPalletsWithSystem;
 	type MaxAssetsIntoHolding = MaxAssetsIntoHolding;
 	type FeeManager = XcmFeeManagerFromComponents<
 		WaivedLocations,
-		XcmFeeToAccount<Self::AssetTransactor, AccountId, CheckAccount>,
+		XcmFeeToAccount<Self::AssetTransactor, AccountId, TreasuryAccount>,
 	>;
 	// No bridges yet...
 	type MessageExporter = ();
@@ -237,8 +238,6 @@ impl xcm_executor::Config for XcmConfig {
 	type Aliasers = Nothing;
 	type TransactionalProcessor = FrameTransactionalProcessor;
 }
-
-pub const FELLOWSHIP_ADMIN_INDEX: u32 = 1;
 
 parameter_types! {
 	// `GeneralAdmin` pluralistic body.
@@ -262,6 +261,7 @@ pub type LocalOriginToLocation = (
 	// And a usual Signed origin to be used in XCM as a corresponding AccountId32
 	SignedToAccountId32<RuntimeOrigin, AccountId, ThisNetwork>,
 );
+
 /// Type to convert the `StakingAdmin` origin to a Plurality `Location` value.
 pub type StakingAdminToPlurality =
 	OriginToPluralityVoice<RuntimeOrigin, StakingAdmin, StakingAdminBodyId>;
@@ -299,7 +299,11 @@ impl pallet_xcm::Config for Runtime {
 	type XcmExecutor = xcm_executor::XcmExecutor<XcmConfig>;
 	type XcmTeleportFilter = Everything; // == Allow All
 	type XcmReserveTransferFilter = Everything; // == Allow All
-	type Weigher = WeightInfoBounds<PolkadotXcmWeight<RuntimeCall>, RuntimeCall, MaxInstructions>;
+	type Weigher = WeightInfoBounds<
+		crate::weights::xcm::PolkadotXcmWeight<RuntimeCall>,
+		RuntimeCall,
+		MaxInstructions,
+	>;
 	type UniversalLocation = UniversalLocation;
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeCall = RuntimeCall;
